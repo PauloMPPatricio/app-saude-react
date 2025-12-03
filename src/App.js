@@ -3,11 +3,13 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Bell,
   Plus,
+  Minus,
   Trash2,
   Check,
   Clock,
   Pill,
   ChevronLeft,
+  ChevronDown,
   Upload,
   Pencil,
   Calendar,
@@ -23,6 +25,10 @@ import {
   Beaker,
   Stethoscope,
   ClipboardList,
+  Package,
+  FileEdit,
+  AlertOctagon,
+  ShoppingCart,
 } from "lucide-react";
 
 // ============================================================================
@@ -49,16 +55,40 @@ export default function App() {
   const [permission, setPermission] = useState("default");
   const [editingMed, setEditingMed] = useState(null);
 
-  // Estados de Alarme
+  // Estados de Alarme e Confirmação
   const [activeAlarmMed, setActiveAlarmMed] = useState(null);
   const [showSnoozeOptions, setShowSnoozeOptions] = useState(false);
+  const [deleteConfirmationId, setDeleteConfirmationId] = useState(null);
 
   const audioRef = useRef(null);
 
-  // Filtra medicamentos atrasados para mostrar no Dashboard
+  // --- LÓGICA DE ALERTA DE ESTOQUE (GLOBAL) ---
+  const getStockAlert = (med) => {
+    if (med.posology === "SOS" || !med.stock || !med.frequency) return null;
+
+    // Dosagem diária
+    const doseSize = med.amountNumeric || 1;
+    const dosesPerDay = 24 / med.frequency;
+    const dailyConsumption = dosesPerDay * doseSize;
+
+    if (dailyConsumption === 0) return null;
+
+    const daysLeft = med.stock / dailyConsumption;
+
+    if (daysLeft <= 3) {
+      return Math.ceil(daysLeft);
+    }
+    return null;
+  };
+
+  // Filtros para o Dashboard
   const pendingMeds = meds.filter(
-    (med) => !med.isFinished && new Date().getTime() >= med.nextDose
+    (med) =>
+      !med.isFinished &&
+      med.posology !== "SOS" &&
+      new Date().getTime() >= med.nextDose
   );
+  const lowStockMeds = meds.filter((med) => getStockAlert(med) !== null);
 
   // Inicialização
   useEffect(() => {
@@ -81,7 +111,11 @@ export default function App() {
       const now = new Date().getTime();
       setMeds((prevMeds) =>
         prevMeds.map((med) => {
-          if (med.totalDoses && med.takenCount >= med.totalDoses) return med;
+          if (
+            med.posology === "SOS" ||
+            (med.totalDoses && med.takenCount >= med.totalDoses)
+          )
+            return med;
 
           if (!med.notified && med.nextDose <= now) {
             triggerAlarm(med);
@@ -107,7 +141,9 @@ export default function App() {
     try {
       if ("Notification" in window && Notification.permission === "granted") {
         new Notification(`Hora do Remédio: ${med.name}`, {
-          body: `Está na hora de tomar ${med.amount || med.dosage}.`,
+          body: `Está na hora de tomar ${
+            formatDosageDisplay(med.amountNumeric) || med.amount
+          }.`,
           icon: LOGO_DO_APP,
         });
       }
@@ -127,8 +163,10 @@ export default function App() {
     }
   };
 
-  const findNextScheduledDose = (timesArray) => {
-    if (!timesArray || timesArray.length === 0) return new Date().getTime();
+  const findNextScheduledDose = (timesArray, frequencyHours) => {
+    if (!timesArray || timesArray.length === 0)
+      return new Date().getTime() + frequencyHours * 3600000;
+
     const now = new Date();
     const currentHour = now.getHours();
     const currentMinute = now.getMinutes();
@@ -160,21 +198,22 @@ export default function App() {
 
   // --- Ações CRUD ---
   const handleSaveMed = (medData) => {
-    let total = null;
-    if (medData.duration && medData.frequency) {
-      const dosesPerDay = 24 / medData.frequency;
-      total = Math.ceil(dosesPerDay * medData.duration);
-    }
-
-    const firstNextDose = findNextScheduledDose(medData.scheduleTimes);
     const takenCount = editingMed ? editingMed.takenCount || 0 : 0;
+
+    let firstNextDose = null;
+    if (medData.posology !== "SOS") {
+      firstNextDose = findNextScheduledDose(
+        medData.scheduleTimes,
+        medData.frequency
+      );
+    }
 
     const finalData = {
       ...medData,
       nextDose: firstNextDose,
       notified: false,
       isLate: false,
-      totalDoses: total,
+      totalDoses: medData.totalDoses, // Agora usa o valor calculado no formulário
       takenCount: takenCount,
     };
 
@@ -192,9 +231,14 @@ export default function App() {
     setCurrentScreen("add");
   };
 
-  const handleDelete = (id) => {
-    if (window.confirm("Deseja remover este medicamento da lista?")) {
-      setMeds(meds.filter((m) => m.id !== id));
+  const requestDelete = (id) => {
+    setDeleteConfirmationId(id);
+  };
+
+  const confirmDelete = () => {
+    if (deleteConfirmationId) {
+      setMeds(meds.filter((m) => m.id !== deleteConfirmationId));
+      setDeleteConfirmationId(null);
     }
   };
 
@@ -211,7 +255,24 @@ export default function App() {
     setMeds((prevMeds) =>
       prevMeds.map((med) => {
         if (med.id === id) {
-          const nextTime = findNextScheduledDose(med.scheduleTimes);
+          // Decrementa estoque usando valor numérico se disponível
+          const doseToSubtract = med.amountNumeric || 1;
+          const newStock = med.stock
+            ? parseFloat(med.stock) - doseToSubtract
+            : med.stock;
+
+          let nextTime = null;
+          if (med.posology !== "SOS") {
+            if (med.frequency > 24) {
+              nextTime = new Date().getTime() + med.frequency * 60 * 60 * 1000;
+            } else {
+              nextTime = findNextScheduledDose(
+                med.scheduleTimes,
+                med.frequency
+              );
+            }
+          }
+
           const newTakenCount = (med.takenCount || 0) + 1;
           const isFinished = med.totalDoses && newTakenCount >= med.totalDoses;
 
@@ -219,6 +280,7 @@ export default function App() {
             ...med,
             lastTaken: new Date().getTime(),
             nextDose: nextTime,
+            stock: newStock,
             notified: false,
             isLate: false,
             takenCount: newTakenCount,
@@ -263,7 +325,20 @@ export default function App() {
     }
   };
 
-  // --- NAVEGAÇÃO ---
+  // --- AUXILIARES DE FORMATAÇÃO ---
+  const formatDosageDisplay = (value) => {
+    if (!value) return "";
+    if (value === 0.25) return "1/4 do Comprimido";
+    if (value === 0.5) return "1/2 Comprimido (Meio)";
+    if (value === 1.0) return "1 Comprimido";
+
+    const isInteger = Number.isInteger(value);
+    if (isInteger) return `${value} Comprimidos`;
+
+    const integerPart = Math.floor(value);
+    return `${integerPart} Comprimido${integerPart > 1 ? "s" : ""} e meio`;
+  };
+
   const goBack = () => {
     if (currentScreen === "add") {
       if (editingMed) setCurrentScreen("list");
@@ -290,6 +365,38 @@ export default function App() {
           loop
         />
 
+        {/* --- MODAL DE CONFIRMAÇÃO DE EXCLUSÃO --- */}
+        {deleteConfirmationId && (
+          <div className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-200">
+            <div className="bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm text-center transform scale-100 animate-in zoom-in-95 duration-200">
+              <div className="bg-red-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-red-600">
+                <Trash2 size={32} />
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">
+                Excluir Medicamento?
+              </h3>
+              <p className="text-slate-500 mb-6">
+                Esta ação não pode ser desfeita. O histórico deste remédio será
+                apagado.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setDeleteConfirmationId(null)}
+                  className="flex-1 py-3 rounded-xl bg-slate-100 font-bold text-slate-600 hover:bg-slate-200"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 py-3 rounded-xl bg-red-500 font-bold text-white hover:bg-red-600 shadow-lg shadow-red-500/30"
+                >
+                  Excluir
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* --- TELA DE ALARME (OVERLAY) --- */}
         {activeAlarmMed && (
           <div className="absolute inset-0 z-50 bg-teal-600/95 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-white animate-in fade-in duration-300">
@@ -309,7 +416,9 @@ export default function App() {
                     {activeAlarmMed.name}
                   </h3>
                   <p className="text-lg font-medium text-slate-600">
-                    {activeAlarmMed.amount || activeAlarmMed.dosage}
+                    {formatDosageDisplay(activeAlarmMed.amountNumeric) ||
+                      activeAlarmMed.amount ||
+                      activeAlarmMed.dosage}
                   </p>
                 </div>
                 <div className="flex flex-col gap-4 w-full">
@@ -362,7 +471,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Header Dinâmico - Sempre Verde agora */}
+        {/* Header Dinâmico */}
         <header className="bg-teal-600 text-white pt-6 pb-5 px-6 rounded-b-3xl shadow-md relative z-10 transition-colors duration-300">
           <div className="flex justify-between items-center">
             {currentScreen !== "dashboard" ? (
@@ -449,6 +558,34 @@ export default function App() {
                 </div>
               )}
 
+              {/* --- NOVO: ALERTA DE ESTOQUE BAIXO NO DASHBOARD --- */}
+              {lowStockMeds.length > 0 && (
+                <div
+                  onClick={() => setCurrentScreen("list")}
+                  className="col-span-2 bg-orange-50 border border-orange-200 p-5 rounded-3xl mb-2 flex items-center gap-4 shadow-sm cursor-pointer hover:bg-orange-100 transition-colors"
+                >
+                  <div className="bg-orange-100 p-3 rounded-full text-orange-600">
+                    <ShoppingCart size={24} />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-bold text-orange-700 text-lg leading-tight">
+                      Repor Estoque
+                    </h3>
+                    <p className="text-orange-600/80 text-sm font-medium">
+                      {lowStockMeds.length}{" "}
+                      {lowStockMeds.length === 1
+                        ? "medicamento está"
+                        : "medicamentos estão"}{" "}
+                      acabando.
+                    </p>
+                  </div>
+                  <div className="bg-orange-400 text-white p-2 rounded-full">
+                    <ChevronLeft size={20} className="rotate-180" />
+                  </div>
+                </div>
+              )}
+              {/* -------------------------------------------------- */}
+
               {/* Botões do Menu */}
               {meds.length > 0 && (
                 <button
@@ -476,7 +613,6 @@ export default function App() {
                 </div>
                 <div className="text-center">
                   <h3 className="font-bold text-slate-700">Novo Cadastro</h3>
-                  {/* Texto removido conforme solicitado */}
                 </div>
               </button>
 
@@ -514,7 +650,6 @@ export default function App() {
               <h2 className="text-xl font-bold text-slate-800 mb-6 text-center">
                 O que deseja cadastrar?
               </h2>
-
               <div className="space-y-4">
                 <button
                   onClick={() => setCurrentScreen("select_medication_type")}
@@ -536,7 +671,6 @@ export default function App() {
                     className="text-slate-300 rotate-180"
                   />
                 </button>
-
                 <div className="mt-8">
                   <h3 className="text-sm font-bold text-slate-400 mb-3 ml-1 uppercase tracking-wider">
                     Em Breve
@@ -568,7 +702,6 @@ export default function App() {
               <h2 className="text-xl font-bold text-slate-800 mb-6 text-center">
                 Qual tipo de medicamento deseja cadastrar?
               </h2>
-
               <div className="space-y-4">
                 <button
                   onClick={() => setCurrentScreen("add")}
@@ -579,7 +712,7 @@ export default function App() {
                   </div>
                   <div className="text-left flex-1">
                     <h3 className="font-bold text-slate-700 text-lg">
-                      Comprimido
+                      Comprimidos
                     </h3>
                     <p className="text-xs text-slate-400">
                       Cápsulas ou drágeas
@@ -590,7 +723,6 @@ export default function App() {
                     className="text-slate-300 rotate-180"
                   />
                 </button>
-
                 <div className="mt-8">
                   <h3 className="text-sm font-bold text-slate-400 mb-3 ml-1 uppercase tracking-wider">
                     Em Breve
@@ -623,10 +755,12 @@ export default function App() {
             <div className="p-4 pb-24">
               <HomeScreen
                 meds={meds}
-                onDelete={handleDelete}
+                onDelete={requestDelete}
                 onEdit={handleEditMed}
                 onTake={handleTake}
                 onAdd={startNewRegistration}
+                formatDosageDisplay={formatDosageDisplay}
+                getStockAlert={getStockAlert}
               />
             </div>
           )}
@@ -637,11 +771,11 @@ export default function App() {
               <AddMedScreen
                 onSave={handleSaveMed}
                 onCancel={() => {
-                  // Se estava editando, volta pra lista. Se era novo, volta pra seleção.
                   if (editingMed) setCurrentScreen("list");
                   else setCurrentScreen("select_medication_type");
                 }}
                 initialData={editingMed}
+                formatDosageDisplay={formatDosageDisplay}
               />
             </div>
           )}
@@ -651,12 +785,34 @@ export default function App() {
   );
 }
 
-// ... (HomeScreen e AddMedScreen continuam iguais aos anteriores) ...
-// Para economizar espaço, vou apenas referenciar que os sub-componentes
-// HomeScreen e AddMedScreen devem ser mantidos como estavam no código anterior.
-// Mas para o código completo funcionar no Canvas, vou repeti-los aqui:
+// --- SUB-COMPONENTES ---
 
-function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
+function HomeScreen({
+  meds,
+  onDelete,
+  onEdit,
+  onTake,
+  onAdd,
+  formatDosageDisplay,
+  getStockAlert,
+}) {
+  // Helper para formatar data/hora no formato "qua., 04 dez. 16:50"
+  const formatNextDose = (timestamp) => {
+    const date = new Date(timestamp);
+    const datePart = date
+      .toLocaleDateString("pt-BR", {
+        weekday: "short",
+        day: "2-digit",
+        month: "short",
+      })
+      .replace(" de ", " ");
+    const timePart = date.toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return `${datePart} ${timePart}`;
+  };
+
   if (meds.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-[400px] text-slate-400 opacity-60">
@@ -691,13 +847,19 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
       </div>
 
       {sortedMeds.map((med) => {
-        const isLate = !med.isFinished && new Date().getTime() >= med.nextDose;
+        const isLate =
+          !med.isFinished &&
+          med.posology !== "SOS" &&
+          new Date().getTime() >= med.nextDose;
         const nextDate = new Date(med.nextDose);
-        const isContinuous = !med.totalDoses;
+        const isContinuous = med.posology === "Contínuo";
+        const isSOS = med.posology === "SOS";
+        const stockDaysLeft = getStockAlert(med); // Calcula dias restantes de estoque
 
         let borderClass = "border-teal-500";
         if (med.isFinished)
           borderClass = "border-slate-300 bg-slate-100 opacity-80";
+        else if (isSOS) borderClass = "border-orange-400";
         else if (isLate) borderClass = "border-red-500 ring-1 ring-red-100";
 
         return (
@@ -722,14 +884,47 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
                       {med.dosage}
                     </span>
                   )}
-                  {med.amount && (
+
+                  {med.amountNumeric ? (
                     <span className="bg-teal-50 text-teal-700 px-2 py-0.5 rounded">
-                      {med.amount}
+                      {formatDosageDisplay(med.amountNumeric)}
                     </span>
+                  ) : (
+                    med.amount && (
+                      <span className="bg-teal-50 text-teal-700 px-2 py-0.5 rounded">
+                        {med.amount}
+                      </span>
+                    )
                   )}
-                  <span>• {med.frequency}h</span>
+
+                  {isSOS ? (
+                    <span className="text-orange-500">• S.O.S</span>
+                  ) : (
+                    <span>• {med.frequency}h</span>
+                  )}
+                </div>
+
+                {/* Estoque + Alerta de Estoque */}
+                <div className="flex flex-col gap-1 mt-2">
+                  {med.stock && (
+                    <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                      <Package size={12} /> Restam {med.stock} na caixa
+                    </div>
+                  )}
+
+                  {/* --- ALERTA VISUAL DE ESTOQUE BAIXO NO CARTÃO --- */}
+                  {stockDaysLeft !== null && (
+                    <div className="flex items-center gap-2 text-[10px] font-bold text-orange-600 bg-orange-50 px-2 py-1 rounded-md w-fit animate-pulse">
+                      <ShoppingCart size={12} />
+                      <span>
+                        Acaba em {stockDaysLeft} dia
+                        {stockDaysLeft > 1 ? "s" : ""}. Repor estoque!
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
+
               <div className="flex gap-1">
                 {!med.isFinished && (
                   <button
@@ -749,7 +944,11 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
             </div>
 
             <div className="mt-2 mb-3">
-              {isContinuous ? (
+              {isSOS ? (
+                <div className="inline-flex items-center gap-1.5 bg-orange-50 text-orange-600 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide">
+                  <AlertCircle size={12} /> Se necessário
+                </div>
+              ) : isContinuous ? (
                 <div className="inline-flex items-center gap-1.5 bg-blue-50 text-blue-600 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide">
                   <Infinity size={12} /> Uso Contínuo
                 </div>
@@ -787,6 +986,10 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
                     <Check size={18} />
                     <span>Concluído</span>
                   </div>
+                ) : isSOS ? (
+                  <div className="text-orange-500 text-xs font-bold">
+                    Tomar quando sentir dor/sintoma
+                  </div>
                 ) : (
                   <>
                     <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-0.5">
@@ -798,13 +1001,8 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
                       }`}
                     >
                       <Clock size={16} />
-                      <span className="font-bold text-lg">
-                        {isLate
-                          ? "AGORA"
-                          : nextDate.toLocaleTimeString("pt-BR", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
+                      <span className="font-bold text-sm">
+                        {isLate ? "AGORA" : formatNextDose(med.nextDose)}
                       </span>
                     </div>
                   </>
@@ -830,29 +1028,40 @@ function HomeScreen({ meds, onDelete, onEdit, onTake, onAdd }) {
   );
 }
 
-// --- Componente de Formulário (Mantido igual) ---
-function AddMedScreen({ onSave, onCancel, initialData }) {
+// --- Componente de Formulário (ATUALIZADO) ---
+function AddMedScreen({ onSave, onCancel, initialData, formatDosageDisplay }) {
   const [name, setName] = useState("");
   const [dosage, setDosage] = useState("");
-  const [frequency, setFrequency] = useState("8");
+  const [stock, setStock] = useState("");
+  const [posology, setPosology] = useState("");
   const [amount, setAmount] = useState("");
+
+  // NOVO: Estado Numérico para o Stepper
+  const [amountNumeric, setAmountNumeric] = useState(1.0);
+
+  const [treatType, setTreatType] = useState("");
   const [duration, setDuration] = useState("");
-  const [isContinuous, setIsContinuous] = useState(false);
+  const [customDays, setCustomDays] = useState([]);
+
+  const [frequency, setFrequency] = useState("");
   const [startTime, setStartTime] = useState("08:00");
+  const [notes, setNotes] = useState("");
   const [generatedTimes, setGeneratedTimes] = useState([]);
 
   useEffect(() => {
     if (initialData) {
       setName(initialData.name);
       setDosage(initialData.dosage || "");
-      setFrequency(initialData.frequency.toString());
+      setStock(initialData.stock || "");
+      setPosology(initialData.posology || "Tratamento");
       setAmount(initialData.amount || "");
-      if (initialData.duration) {
-        setDuration(initialData.duration);
-        setIsContinuous(false);
-      } else {
-        setDuration("");
-        setIsContinuous(true);
+      setTreatType(initialData.treatType || "Todos os dias");
+      setDuration(initialData.duration || "");
+      setCustomDays(initialData.customDays || []);
+      setFrequency(String(initialData.frequency || "8"));
+      setNotes(initialData.notes || "");
+      if (initialData.amountNumeric) {
+        setAmountNumeric(initialData.amountNumeric);
       }
       if (initialData.scheduleTimes && initialData.scheduleTimes.length > 0) {
         setStartTime(initialData.scheduleTimes[0]);
@@ -860,48 +1069,111 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
     }
   }, [initialData]);
 
+  // Recalcula horários
   useEffect(() => {
-    calculateSchedule(startTime, frequency);
-  }, [startTime, frequency]);
-
-  useEffect(() => {
-    if (isContinuous) setDuration("");
-  }, [isContinuous]);
-
-  const calculateSchedule = (start, freq) => {
-    const freqNum = Number(freq);
-    if (!freqNum || !start) return;
-    const [startHour, startMinute] = start.split(":").map(Number);
-    const slots = Math.floor(24 / freqNum);
-    const times = [];
-    for (let i = 0; i < slots; i++) {
-      let h = (startHour + i * freqNum) % 24;
-      const timeString = `${h.toString().padStart(2, "0")}:${startMinute
-        .toString()
-        .padStart(2, "0")}`;
-      times.push(timeString);
+    if (posology === "SOS") {
+      setGeneratedTimes([]);
+      return;
     }
-    setGeneratedTimes(times);
+    const freqNum = Number(frequency);
+    if (!freqNum || !startTime) return;
+
+    if (
+      posology === "Contínuo" ||
+      (posology === "Tratamento" && treatType === "Todos os dias")
+    ) {
+      const [startHour, startMinute] = startTime.split(":").map(Number);
+      const slots = Math.floor(24 / freqNum);
+      const times = [];
+      for (let i = 0; i < slots; i++) {
+        let h = (startHour + i * freqNum) % 24;
+        const timeString = `${String(h).padStart(2, "0")}:${String(
+          startMinute
+        ).padStart(2, "0")}`;
+        times.push(timeString);
+      }
+      setGeneratedTimes(times);
+    } else {
+      setGeneratedTimes([startTime]);
+    }
+  }, [frequency, startTime, posology, treatType]);
+
+  const toggleCustomDay = (day) => {
+    if (customDays.includes(day)) {
+      setCustomDays(customDays.filter((d) => d !== day));
+    } else {
+      setCustomDays([...customDays, day]);
+    }
   };
 
-  const calculateTotalDoses = () => {
-    if (isContinuous) return "Uso Contínuo";
-    if (!duration || !frequency) return 0;
-    const dosesPerDay = 24 / Number(frequency);
-    return Math.ceil(dosesPerDay * Number(duration));
+  // --- Lógica do Stepper de Dosagem ---
+  const handleDecrement = () => {
+    if (amountNumeric <= 0.25) return;
+
+    if (amountNumeric === 0.5) {
+      setAmountNumeric(0.25);
+    } else if (amountNumeric === 1.0) {
+      setAmountNumeric(0.5);
+    } else {
+      setAmountNumeric(amountNumeric - 0.5);
+    }
   };
+
+  const handleIncrement = () => {
+    if (amountNumeric === 0.25) {
+      setAmountNumeric(0.5);
+    } else if (amountNumeric === 0.5) {
+      setAmountNumeric(1.0);
+    } else {
+      setAmountNumeric(amountNumeric + 0.5);
+    }
+  };
+
+  // Verifica se é fracionado (tem resto na divisão por 1)
+  const isFraction = amountNumeric % 1 !== 0;
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!name || !frequency) return;
+    if (!name || !posology) return;
+    if (posology !== "SOS" && !frequency) return;
+
+    let finalFrequency = Number(frequency);
+    if (posology === "Tratamento") {
+      if (treatType === "Todas as semanas") finalFrequency = 168;
+      if (treatType === "Todos os meses") finalFrequency = 720;
+      if (treatType === "Todos os anos") finalFrequency = 8760;
+    }
+
+    // Calcula totalDoses
+    let total = null;
+    if (posology === "Tratamento" && duration && frequency) {
+      let durationInHours = 0;
+      if (treatType === "Todos os dias") durationInHours = duration * 24;
+      else if (treatType === "Todas as semanas")
+        durationInHours = duration * 168;
+      else if (treatType === "Todos os meses") durationInHours = duration * 720;
+      else if (treatType === "Todos os anos") durationInHours = duration * 8760;
+
+      if (durationInHours > 0) {
+        total = Math.ceil(durationInHours / finalFrequency);
+      }
+    }
+
     onSave({
       id: initialData ? initialData.id : Date.now(),
       name,
       dosage,
-      amount,
-      duration: isContinuous ? null : duration ? Number(duration) : null,
-      frequency: Number(frequency),
+      stock,
+      posology,
+      amount: formatDosageDisplay(amountNumeric),
+      amountNumeric,
+      treatType,
+      duration,
+      customDays,
+      frequency: finalFrequency,
       scheduleTimes: generatedTimes,
+      totalDoses: total, // Salva o total calculado
+      notes,
     });
   };
 
@@ -910,10 +1182,11 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
       <h2 className="text-xl font-bold text-slate-800 mb-6">
         {initialData ? "Editar" : "Novo Medicamento"}
       </h2>
+
       <form onSubmit={handleSubmit} className="space-y-5">
         <div>
           <label className="block text-sm font-bold text-slate-500 mb-2">
-            Nome do Remédio
+            Nome do medicamento
           </label>
           <input
             type="text"
@@ -924,10 +1197,11 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
             required
           />
         </div>
+
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-bold text-slate-500 mb-2">
-              Gramatura
+              Concentração
             </label>
             <input
               type="text"
@@ -939,98 +1213,197 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
           </div>
           <div>
             <label className="block text-sm font-bold text-slate-500 mb-2">
-              Intervalo
+              Qtd na Caixa
+            </label>
+            <input
+              type="number"
+              placeholder="Ex: 30"
+              className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-teal-500 outline-none"
+              value={stock}
+              onChange={(e) => setStock(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <h3 className="text-xl font-bold text-slate-800 mb-4 mt-4">
+          Posologia
+        </h3>
+
+        <div>
+          <label className="block text-sm font-bold text-slate-500 mb-2">
+            Como será o uso do medicamento
+          </label>
+          <div className="relative">
+            <select
+              value={posology}
+              onChange={(e) => setPosology(e.target.value)}
+              className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 focus:ring-2 focus:ring-teal-500 outline-none appearance-none"
+            >
+              <option value="" disabled hidden>
+                Selecione...
+              </option>
+              <option value="Contínuo">Contínuo</option>
+              <option value="Tratamento">Tratamento</option>
+              <option value="SOS">S.O.S</option>
+            </select>
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-black">
+              <ChevronDown size={16} />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 items-start">
+          {/* --- COMPONENTE DE DOSAGEM COM STEPPER --- */}
+          <div>
+            <label className="block text-sm font-bold text-slate-500 mb-2">
+              Dosagem
+            </label>
+            <div className="flex items-center bg-slate-50 rounded-xl p-1 border border-slate-200 h-[56px]">
+              <button
+                type="button"
+                onClick={handleDecrement}
+                className="w-10 h-full flex items-center justify-center text-slate-400 hover:text-teal-600 hover:bg-white rounded-lg transition-all disabled:opacity-30"
+                disabled={amountNumeric <= 0.25}
+              >
+                <Minus size={20} />
+              </button>
+
+              <div className="flex-1 text-center flex items-center justify-center px-1">
+                <span className="text-xs font-bold text-slate-700 leading-tight">
+                  {formatDosageDisplay(amountNumeric)}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleIncrement}
+                className="w-10 h-full flex items-center justify-center text-slate-400 hover:text-teal-600 hover:bg-white rounded-lg transition-all"
+              >
+                <Plus size={20} />
+              </button>
+            </div>
+          </div>
+
+          {/* --- Interval (Always visible) --- */}
+          <div>
+            <label className="block text-sm font-bold text-slate-500 mb-2">
+              Intervalo entre doses
             </label>
             <div className="relative">
               <select
                 value={frequency}
                 onChange={(e) => setFrequency(e.target.value)}
-                className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 focus:ring-2 focus:ring-teal-500 outline-none appearance-none font-medium"
+                className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 focus:ring-2 focus:ring-teal-500 outline-none appearance-none"
               >
+                <option value="" disabled hidden>
+                  Selecione...
+                </option>
                 <option value="4">4 em 4h</option>
                 <option value="6">6 em 6h</option>
                 <option value="8">8 em 8h</option>
                 <option value="12">12 em 12h</option>
                 <option value="24">1x ao dia</option>
               </select>
-              <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
-                <Clock size={16} />
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-black">
+                <ChevronDown size={16} />
               </div>
             </div>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-bold text-slate-500 mb-2">
-              Dosagem
-            </label>
-            <input
-              type="text"
-              placeholder="Ex: 1 comp"
-              className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-teal-500 outline-none"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </div>
-          <div>
-            <div className="flex justify-between items-center mb-2">
-              <label className="block text-sm font-bold text-slate-500">
-                Duração
-              </label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  id="continuous"
-                  checked={isContinuous}
-                  onChange={(e) => setIsContinuous(e.target.checked)}
-                  className="w-4 h-4 text-teal-600 rounded cursor-pointer"
-                />
-                <label
-                  htmlFor="continuous"
-                  className="text-[10px] uppercase font-bold text-teal-600 cursor-pointer"
-                >
-                  Contínuo
-                </label>
-              </div>
-            </div>
-            <input
-              type="number"
-              placeholder={isContinuous ? "∞" : "Dias"}
-              disabled={isContinuous}
-              className={`w-full p-4 border-none rounded-xl text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-teal-500 outline-none ${
-                isContinuous
-                  ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-                  : "bg-slate-50"
-              }`}
-              value={duration}
-              onChange={(e) => setDuration(e.target.value)}
-            />
           </div>
         </div>
 
-        {(isContinuous || (duration && frequency)) && (
-          <div className="flex items-center gap-2 text-xs text-teal-600 font-medium bg-teal-50 p-3 rounded-lg">
-            <Calendar size={14} />
-            {isContinuous ? (
-              <span>
-                Previsão: <b>Uso Contínuo</b>
-              </span>
-            ) : (
-              <span>
-                Total previsto: <b>{calculateTotalDoses()} doses</b>
-              </span>
+        {/* --- ALERTA DE SEGURANÇA (Fracionados) --- */}
+        {isFraction && (
+          <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 flex gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+            <AlertTriangle className="text-orange-500 shrink-0" size={20} />
+            <p className="text-xs text-orange-700 font-medium leading-snug">
+              <b>Atenção:</b> Apenas comprimidos sulcados (com risco no meio)
+              podem ser partidos. Nunca parta cápsulas, drágeas ou comprimidos
+              de liberação prolongada.
+            </p>
+          </div>
+        )}
+
+        {/* --- Frequency & Duration (Only if Tratamento) --- */}
+        {posology === "Tratamento" && (
+          <div className="grid grid-cols-2 gap-4 mt-2">
+            <div>
+              <label className="block text-sm font-bold text-slate-500 mb-2">
+                Frequência
+              </label>
+              <div className="relative">
+                <select
+                  value={treatType}
+                  onChange={(e) => setTreatType(e.target.value)}
+                  className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 focus:ring-2 focus:ring-teal-500 outline-none appearance-none"
+                >
+                  <option value="" disabled hidden>
+                    Selecione...
+                  </option>
+                  <option>Todos os dias</option>
+                  <option>Todas as semanas</option>
+                  <option>Todos os meses</option>
+                  <option>Todos os anos</option>
+                  <option>Personalizar...</option>
+                </select>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-black">
+                  <ChevronDown size={16} />
+                </div>
+              </div>
+            </div>
+
+            {/* Duration (Hidden if Custom) */}
+            {treatType !== "Personalizar..." && (
+              <div>
+                <label className="block text-sm font-bold text-teal-700 mb-2">
+                  Duração
+                </label>
+                <input
+                  type="number"
+                  placeholder="Ex: 7"
+                  className="w-full p-4 bg-slate-50 border-none rounded-xl outline-none focus:border-teal-500"
+                  value={duration}
+                  onChange={(e) => setDuration(e.target.value)}
+                />
+              </div>
             )}
           </div>
         )}
 
-        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-          <label className="block text-sm font-bold text-teal-700 mb-3 flex items-center gap-2">
-            <Clock size={16} /> Horários Diários
-          </label>
-          <div className="space-y-3">
+        {/* --- Custom Days --- */}
+        {posology === "Tratamento" && treatType === "Personalizar..." && (
+          <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 animate-in slide-in-from-top">
+            <label className="block text-sm font-bold text-teal-700 mb-3 flex items-center gap-2">
+              <Calendar size={16} /> Escolha os dias (Mês)
+            </label>
+            <div className="grid grid-cols-7 gap-2">
+              {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => toggleCustomDay(day)}
+                  className={`p-2 text-xs rounded-lg font-bold transition-colors ${
+                    customDays.includes(day)
+                      ? "bg-teal-600 text-white"
+                      : "bg-white text-slate-400 hover:bg-slate-200"
+                  }`}
+                >
+                  {day}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* --- Horários (Visible only if interval selected) --- */}
+        {posology !== "SOS" && frequency && (
+          <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 animate-in slide-in-from-top">
+            <label className="block text-sm font-bold text-teal-700 mb-3 flex items-center gap-2">
+              <Clock size={16} /> Horários
+            </label>
+
             <div>
-              <label className="text-xs text-slate-400 font-semibold uppercase ml-1">
-                1ª Dose
+              <label className="block text-sm font-bold text-slate-500 mb-2">
+                Horário {posology === "Contínuo" ? "Inicial" : "da Dose"}
               </label>
               <input
                 type="time"
@@ -1040,24 +1413,35 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
                 required
               />
             </div>
-            <div className="grid grid-cols-3 gap-2 mt-4">
-              {generatedTimes.map((time, index) => (
-                <div
-                  key={index}
-                  className={`p-2 rounded-lg text-center border ${
-                    index === 0
-                      ? "bg-teal-100 border-teal-200 text-teal-800"
-                      : "bg-white border-slate-200 text-slate-600"
-                  }`}
-                >
-                  <span className="text-[10px] block opacity-60 uppercase">
-                    {index + 1}ª vez
-                  </span>
-                  <span className="font-bold">{time}</span>
+
+            {/* Mostra horários calculados apenas se for diário */}
+            {(posology === "Contínuo" ||
+              (posology === "Tratamento" && treatType === "Todos os dias")) &&
+              generatedTimes.length > 0 && (
+                <div className="grid grid-cols-4 gap-2 mt-4">
+                  {generatedTimes.map((time, index) => (
+                    <div
+                      key={index}
+                      className="text-[10px] bg-white border rounded p-1 text-center font-bold text-slate-600"
+                    >
+                      {time}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
           </div>
+        )}
+
+        <div>
+          <label className="block text-sm font-bold text-slate-500 mb-2">
+            Observações
+          </label>
+          <textarea
+            placeholder="Ex: Tomar após as refeições"
+            className="w-full p-4 bg-slate-50 border-none rounded-xl text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-teal-500 outline-none resize-none h-24"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          ></textarea>
         </div>
 
         <div className="pt-4 flex gap-3">
@@ -1072,7 +1456,7 @@ function AddMedScreen({ onSave, onCancel, initialData }) {
             type="submit"
             className="flex-1 py-3.5 rounded-xl font-bold text-white bg-teal-600 hover:bg-teal-700 shadow-lg shadow-teal-600/25 transition-all active:scale-95"
           >
-            {initialData ? "Salvar" : "Criar"}
+            {initialData ? "Salvar" : "Cadastrar"}
           </button>
         </div>
       </form>
